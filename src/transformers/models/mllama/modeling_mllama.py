@@ -586,6 +586,7 @@ class MllamaTextCrossSdpaAttention(MllamaTextCrossAttention):
         output_attentions: bool = False,
         use_cache: bool = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
         if output_attentions:
@@ -635,6 +636,49 @@ class MllamaTextCrossSdpaAttention(MllamaTextCrossAttention):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         key_states = self.k_norm(key_states)
+
+        # DAVID CODE START: KV Cache compression adapted from Wei
+        # if "keep_ratio" in kwargs:
+        if query_states.shape[2] == 1:
+            _, _, kv_seq_len, _ = key_states.shape
+
+            # keep_ratio = kwargs["keep_ratio"]
+            keep_ratio = 0.5
+            tokens_to_keep = round(kv_seq_len * keep_ratio)
+            keep_indices = []
+
+            if not hasattr(past_key_value, 'scale'):
+                past_key_value.scale = query_states.shape[-1] ** 0.5
+            attention_weights = torch.einsum("bhqd,bhkd->bhqk", query_states, key_states) 
+
+            # get the top-k tokens with the highest attention weights
+            token_scores = attention_weights.mean(dim=2).squeeze(1).squeeze(0)
+            topk_indices = torch.topk(token_scores, tokens_to_keep, largest=True).indices
+            keep_indices.append(topk_indices)
+            keep_indices = torch.cat(keep_indices).sort().values
+
+            num_heads = key_states.shape[1]
+
+            # Initialize a tensor to store the selected key states
+            selected_key_states = torch.empty(1, num_heads, tokens_to_keep, 128, dtype=torch.bfloat16, device=query_states.device)
+            selected_value_states = torch.empty(1, num_heads, tokens_to_keep, 128, dtype=torch.bfloat16, device=query_states.device)
+
+            # Iterate over each head
+            for head in range(num_heads):
+                # Select indices for the current head
+                selected_indices = keep_indices[head]
+
+                # Use index_select to select the indices for the current head
+                selected_key_states[0, head] = key_states[0, head].index_select(0, selected_indices)
+                selected_value_states[0, head] = value_states[0, head].index_select(0, selected_indices)
+
+            key_states = selected_key_states
+            value_states = selected_value_states
+
+            attention_mask = torch.zeros((1, 1, 1, tokens_to_keep), dtype=torch.bfloat16, device=query_states.device)
+
+        # DAVID CODE END
+
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
