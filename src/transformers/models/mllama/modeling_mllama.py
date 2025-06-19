@@ -38,6 +38,7 @@ from ...utils import (
 )
 from .configuration_mllama import MllamaConfig, MllamaTextConfig, MllamaVisionConfig
 
+GLOBAL_KEEP_RATIO = 1
 
 logger = logging.get_logger(__name__)
 
@@ -638,12 +639,11 @@ class MllamaTextCrossSdpaAttention(MllamaTextCrossAttention):
         key_states = self.k_norm(key_states)
 
         # DAVID CODE START: KV Cache compression adapted from Wei
-        # if "keep_ratio" in kwargs:
         if query_states.shape[2] == 1:
             _, _, kv_seq_len, _ = key_states.shape
+            
+            keep_ratio = GLOBAL_KEEP_RATIO
 
-            # keep_ratio = kwargs["keep_ratio"]
-            keep_ratio = 0.5
             tokens_to_keep = round(kv_seq_len * keep_ratio)
             keep_indices = []
 
@@ -2180,6 +2180,7 @@ class MllamaForConditionalGeneration(MllamaPreTrainedModel, GenerationMixin):
         [', it would be:.\\nA stop sign in Chinatown.\\n']
         ```
         """
+        GLOBAL_KEEP_RATIO = float(self.keep_ratio)
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
